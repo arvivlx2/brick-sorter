@@ -106,6 +106,12 @@ details summary{font-weight:900;cursor:pointer;padding:6px 0}
 #modal.show{display:grid}
 #modal .card{max-width:380px;width:100%}
 .mrow{display:flex;gap:8px;margin-top:14px}.mrow .btn{flex:1}
+.crop{width:60px;height:60px;object-fit:cover;border-radius:10px;border:2px solid #f1ead8;flex:none}
+.fix{background:none;color:var(--blue);font-weight:800;font-size:13px;padding:6px 0 0;text-decoration:underline}
+.picker{max-height:86vh;display:flex;flex-direction:column}
+.plist{overflow:auto;flex:1;min-height:200px}
+.prow{display:flex;gap:10px;align-items:center;width:100%;text-align:left;padding:8px 2px;border-bottom:1px solid #f1ead8;background:none}
+.c-maybe{background:#fff1c2;color:#8a6500}
 .complete{color:var(--grn);font-weight:900}
 .links{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
 .links button{background:none;color:var(--mut);font-weight:800;font-size:13px;text-decoration:underline;padding:4px}
@@ -380,22 +386,24 @@ function colorMatches(p, colors) {
   return colors.slice(0, 2).some(c => names.includes(norm(c.name)) || ids.includes(String(c.id)));
 }
 function analysePiece(res, idx) {
-  const items = (res.items || []).filter(it => it.type === "part" || !it.type).slice(0, 4);
-  const colors = (res.colors || []).filter(c => (c.score ?? 1) >= 0.15);
+  // Brickognize gives several guesses. Since we know which parts the sets contain,
+  // take the best-ranked guess that is actually in one of the sets (looking deep down the list).
+  const items = (res.items || []).filter(it => it.type === "part" || !it.type).slice(0, 12);
+  const colors = (res.colors || []).filter(c => (c.score ?? 1) >= 0.1);
   const top = items[0];
-  const out = { name: top ? top.name : "Unknown piece", partId: top ? top.id : "", img: top ? top.img_url : "", score: top ? top.score : 0, color: colors[0]?.name || "", options: [] };
+  const out = { name: top ? top.name : "Unknown piece", partId: top ? top.id : "", img: top ? top.img_url : "", score: top ? top.score : 0, color: colors[0]?.name || "", options: [], guesses: items.map(it => it.id) };
   for (let rank = 0; rank < items.length; rank++) {
     const it = items[rank];
-    if (rank > 0 && it.score < 0.15) break;
+    if (rank > 0 && it.score < 0.04) break;
     const refs = lookup(idx, it.id);
     if (!refs.length) continue;
     const withColor = refs.filter(r => colorMatches(S.sets[r.id].parts[r.i], colors));
     const use = withColor.length ? withColor : refs;
     for (const r of use) out.options.push({ id: r.id, i: r.i, rank, colorOk: withColor.length > 0, name: it.name });
-    out.name = it.name; out.partId = it.id; out.img = it.img_url; out.score = it.score;
-    break; // first (best) candidate that is in one of the sets
+    out.name = it.name; out.partId = it.id; out.img = it.img_url; out.score = it.score; out.rank = rank;
+    break;
   }
-  out.conf = out.score >= 0.75 ? "high" : out.score >= 0.45 ? "medium" : "low";
+  out.conf = out.options.length && out.rank > 0 ? "maybe" : out.score >= 0.75 ? "high" : out.score >= 0.45 ? "medium" : "low";
   return out;
 }
 
@@ -415,7 +423,7 @@ function vHome() {
       <div class="bar ${p.pct >= 100 ? "done" : ""}"><i style="width:${p.pct}%"></i></div>
       <div class="pct">${p.pct >= 100 ? `<span class="complete">Complete! 🎉</span>` : `${p.found} / ${p.need} pieces · ${p.pct}%`}</div></div></button></div>`;
   }
-  h += `<div class="bottom"><button class="btn yellow" data-a="add">＋ Add set</button><button class="btn red" data-a="scan" ${list.length ? "" : "disabled"}>📷 Scan pile</button></div>`;
+  h += `<div class="bottom"><button class="btn yellow" data-a="add">＋ Add set</button><button class="btn red" data-a="scan" ${list.length ? "" : "disabled"}>📷 Find pieces</button></div>`;
   return h;
 }
 
@@ -480,57 +488,96 @@ function vAdd() {
 
 function vScan() {
   const C = S.scan;
-  if (C.results) return vResults();
+  if (C.results && (C.mode === "single" || !C.img || C.showResults)) return vResults();
   const sets = Object.values(S.sets);
-  let h = `<button class="back" data-a="home" ${C.busy ? "disabled" : ""}>← Back</button><h2 style="font-size:24px">Scan a pile</h2>`;
-  if (!C.img) {
-    h += `<div class="card" style="margin-top:12px"><b>For best results</b><ol class="steps"><li>Spread the pieces out in one layer — not touching each other.</li><li>Use a plain background that contrasts with the pieces (e.g. a white sheet; a dark towel for white/grey pieces).</li><li>Shoot from straight above in good light. 10–30 pieces per photo works best.</li></ol></div>
+  let h = `<button class="back" data-a="home" ${C.busy ? "disabled" : ""}>← Back</button><h2 style="font-size:24px">Find pieces</h2>
+  <div class="toggle" style="margin-top:12px"><button class="${C.mode === "single" ? "on" : ""}" data-a="mode" data-v="single">One piece at a time</button><button class="${C.mode === "pile" ? "on" : ""}" data-a="mode" data-v="pile">Whole pile</button></div>
+  <span class="lbl">Look for pieces from</span>
+  <div class="chips">${sets.map(s => `<button class="chip ${C.only.has(s.id) ? "on" : ""}" data-a="scanSet" data-id="${esc(s.id)}">${esc(s.name)}${s.owned === false ? " (checking)" : ""}</button>`).join("")}</div>`;
+  if (C.mode === "single") {
+    h += `<div class="card" style="margin-top:14px"><b>Most accurate.</b><ol class="steps"><li>Put one piece on a plain sheet of paper.</li><li>Take the photo close up, piece filling about half the picture.</li><li>Check the answer, then tap <b>Next piece</b>.</li></ol></div>
+    <label class="btn red full" style="margin-top:6px">📷 Photograph a piece<input type="file" accept="image/*" capture="environment" id="oneIn"></label>
+    <label class="btn ghost full" style="margin-top:10px">🖼️ Choose from gallery<input type="file" accept="image/*" id="oneIn2"></label>`;
+  } else if (!C.img) {
+    h += `<div class="card" style="margin-top:14px"><b>For best results</b><ol class="steps"><li>Spread the pieces out in one layer — not touching.</li><li>Plain background that contrasts with the pieces (a white sheet; a dark towel for white/grey pieces).</li><li>Straight from above, good light, 10–20 pieces per photo.</li></ol></div>
     <label class="btn red full" style="margin-top:6px">📷 Take or choose a photo<input type="file" accept="image/*" id="pileIn"></label>`;
   } else {
     const on = C.boxes.filter(b => b.on).length;
-    h += `<div class="hint" style="margin:8px 0">Found <b>${C.boxes.length}</b> pieces. Tap a box to leave it out (shadows, non-Lego things).</div>
-    <div class="stage" id="stage"><img src="${C.img}" alt="">${C.boxes.map((b, i) => `<div class="box ${b.on ? "" : "off"}" data-a="tbox" data-i="${i}" style="left:${b.x * 100}%;top:${b.y * 100}%;width:${b.w * 100}%;height:${b.h * 100}%"><span>${i + 1}</span></div>`).join("")}</div>
-    <span class="lbl">Look for pieces from</span>
-    <div class="chips">${sets.map(s => `<button class="chip ${C.only.has(s.id) ? "on" : ""}" data-a="scanSet" data-id="${esc(s.id)}">${esc(s.name)}${s.owned === false ? " (checking)" : ""}</button>`).join("")}</div>
-    ${C.msg ? `<div class="status ${C.err ? "err" : ""}">${C.busy ? `<div class="spin"></div>` : ""}<span id="scanMsg">${esc(C.msg)}</span></div>` : ""}
+    h += `<div class="hint" style="margin:12px 0 8px">Found <b>${C.boxes.length}</b> pieces. Tap a box to leave it out. If one box holds two pieces, move them apart and take a new photo.</div>
+    <div class="stage"><img src="${C.img}" alt="">${C.boxes.map((b, i) => `<div class="box ${b.on ? "" : "off"}" data-a="tbox" data-i="${i}" style="left:${b.x * 100}%;top:${b.y * 100}%;width:${b.w * 100}%;height:${b.h * 100}%"><span>${i + 1}</span></div>`).join("")}</div>
     <div class="bottom"><label class="btn ghost" ${C.busy ? 'style="pointer-events:none;opacity:.5"' : ""}>↺ New photo<input type="file" accept="image/*" id="pileIn"></label><button class="btn red" data-a="identify" ${C.busy || !on || !C.only.size ? "disabled" : ""}>🔍 Identify ${on}</button></div>`;
   }
-  if (!C.img && C.msg) h += `<div class="status ${C.err ? "err" : ""}">${C.busy ? `<div class="spin"></div>` : ""}<span>${esc(C.msg)}</span></div>`;
+  if (C.msg) h += `<div class="status ${C.err ? "err" : ""}">${C.busy ? `<div class="spin"></div>` : ""}<span id="scanMsg">${esc(C.msg)}</span></div>`;
   return h;
 }
 
 function optLabel(o) {
   const s = S.sets[o.id]; const p = s.parts[o.i]; const need = Math.max(0, p.q - (p.f || 0));
-  return `${swatch(p)}${esc(s.name)}${s.owned === false ? " (checking)" : ""} · ${esc(p.c)} · ${need ? "needs " + need : "full"}${o.rank > 0 ? " · maybe: " + esc(p.n) : ""}${!o.colorOk ? " · colour?" : ""}`;
+  return `${swatch(p)}${esc(s.name)}${s.owned === false ? " (checking)" : ""} · ${esc(p.c)} · ${need ? "needs " + need : "full"}${!o.colorOk ? " · colour?" : ""}`;
+}
+function pieceRow(r, ri, locked) {
+  const opt = r.choice != null && r.choice !== "skip" ? r.options[r.choice] : null;
+  const p = opt ? S.sets[opt.id].parts[opt.i] : null;
+  const needSets = new Set(r.options.filter(o => { const q = S.sets[o.id].parts[o.i]; return q.q - (q.f || 0) > 0; }).map(o => o.id));
+  const conf = r.manual ? `<span class="conf c-high">you chose</span>` : `<span class="conf c-${r.conf === "maybe" ? "medium" : r.conf}">${r.conf === "maybe" ? "best guess" : r.conf}</span>`;
+  return `<div class="res"><div class="rh"><img class="crop" src="${r.thumb}" alt=""><span style="align-self:center;color:var(--mut);font-weight:900">→</span>${(p && p.img) || r.img ? `<img class="pimg" src="${esc((p && p.img) || r.img)}" alt="">` : `<div class="pimg"></div>`}
+      <div class="grow"><b>${esc(p ? p.n : r.name)}</b><br><small>#${esc(p ? p.p : r.partId)}${r.color ? " · looks " + esc(r.color) : ""}</small></div>${conf}</div>
+    ${r.options.length ? `${needSets.size >= 2 && r.choice == null ? `<span class="decide">Fits ${needSets.size} sets — your call</span>` : ""}
+    <div class="chips">${r.options.map((o, oi) => { const q = S.sets[o.id].parts[o.i]; return `<button class="chip ${r.choice === oi ? "on" : ""} ${q.q - (q.f || 0) > 0 ? "" : "full"}" data-a="pick" data-r="${ri}" data-o="${oi}" ${locked ? "disabled" : ""}>${optLabel(o)}</button>`; }).join("")}
+      <button class="chip skip ${r.choice === "skip" ? "on" : ""}" data-a="pick" data-r="${ri}" data-o="skip" ${locked ? "disabled" : ""}>Skip</button></div>` : `<div class="hint" style="margin-top:4px">Not in your sets${r.partId ? "" : " — couldn't tell what it is"}.</div>`}
+    ${locked ? "" : `<button class="fix" data-a="fix" data-r="${ri}">✏️ Wrong? Pick the right part</button>`}</div>`;
 }
 function vResults() {
   const C = S.scan, R = C.results;
   const matched = R.filter(r => r.options.length), unmatched = R.filter(r => !r.options.length);
   const undecided = matched.filter(r => r.choice == null).length;
-  const nM = matched.reduce((a, r) => a + r.count, 0), nU = unmatched.reduce((a, r) => a + r.count, 0);
-  let h = `<button class="back" data-a="scanNew">← New scan</button><h2 style="font-size:24px;margin-bottom:10px">What I found</h2>
-  <div class="sum"><div><b>${nM + nU}</b><span>pieces</span></div><div><b>${nM}</b><span>fit your sets</span></div><div><b>${undecided}</b><span>need your call</span></div></div>
-  ${C.applied ? `<div class="status ok">✓ ${esc(C.applied)}</div>` : ""}`;
-  if (matched.length) {
-    h += `<div class="card" style="margin-top:12px">`;
-    matched.forEach(r => {
-      const ri = R.indexOf(r);
-      const needing = new Set(r.options.filter(o => { const p = S.sets[o.id].parts[o.i]; return p.q - (p.f || 0) > 0; }).map(o => o.id));
-      h += `<div class="res"><div class="rh">${r.img ? `<img class="pimg" src="${esc(r.img)}" alt="">` : ""}<div class="grow"><b>${esc(r.name)}</b> <span style="font-weight:900">×${r.count}</span><br><small>#${esc(r.partId)}${r.color ? " · looks " + esc(r.color) : ""}</small></div><span class="conf c-${r.conf}">${r.conf}</span></div>
-        <div class="crops">${r.thumbs.slice(0, 8).map(t => `<img src="${t}" alt="">`).join("")}</div>
-        ${needing.size >= 2 && r.choice == null ? `<span class="decide">Fits ${needing.size} sets — your call</span>` : ""}
-        <div class="chips">${r.options.map((o, oi) => { const p = S.sets[o.id].parts[o.i]; return `<button class="chip ${o.rank ? "maybe" : ""} ${r.choice === oi ? "on" : ""} ${p.q - (p.f || 0) > 0 ? "" : "full"}" data-a="pick" data-r="${ri}" data-o="${oi}" ${C.applied ? "disabled" : ""}>${optLabel(o)}</button>`; }).join("")}
-          <button class="chip skip ${r.choice === "skip" ? "on" : ""}" data-a="pick" data-r="${ri}" data-o="skip" ${C.applied ? "disabled" : ""}>Skip</button></div></div>`;
-    });
-    h += `</div>`;
-  } else h += `<div class="card empty" style="margin-top:12px">None of these pieces are in the selected sets.</div>`;
-  if (unmatched.length) h += `<div class="card"><details><summary>Not in your sets (${nU})</summary>${unmatched.map(r => `<div class="row">${r.thumbs[0] ? `<img class="pimg" src="${r.thumbs[0]}" alt="">` : ""}<div class="pi"><b>${esc(r.name)}</b><small>${r.partId ? "#" + esc(r.partId) : ""}${r.color ? " · " + esc(r.color) : ""}</small></div><b>×${r.count}</b></div>`).join("")}</details></div>`;
-  h += `<div class="hint" style="margin:6px 2px 0">Compare the little photos with the part picture before adding — similar pieces can get mixed up.</div>`;
-  if (!C.applied) {
-    const n = matched.filter(r => r.choice != null && r.choice !== "skip").reduce((a, r) => a + r.count, 0);
-    h += `<div class="bottom"><button class="btn yellow" data-a="apply" ${undecided || !n ? "disabled" : ""}>${undecided ? `Decide ${undecided} more first` : `Add ${n} pieces to sets`}</button></div>`;
-  } else h += `<div class="bottom"><button class="btn ghost" data-a="home">All sets</button><button class="btn red" data-a="scanNew">📷 Scan another</button></div>`;
+  const locked = !!C.applied;
+  let h = `<button class="back" data-a="scanNew">← ${C.mode === "single" ? "Back" : "New scan"}</button><h2 style="font-size:24px;margin-bottom:10px">${C.mode === "single" ? "Pieces so far" : "What I found"}</h2>
+  <div class="sum"><div><b>${R.length}</b><span>pieces</span></div><div><b>${matched.length}</b><span>fit your sets</span></div><div><b>${undecided}</b><span>need your call</span></div></div>
+  ${C.applied ? `<div class="status ok">✓ ${esc(C.applied)}</div>` : ""}
+  ${C.msg ? `<div class="status ${C.err ? "err" : ""}">${C.busy ? `<div class="spin"></div>` : ""}<span id="scanMsg">${esc(C.msg)}</span></div>` : ""}
+  <div class="hint" style="margin:10px 2px 0">Left: your photo. Right: what it was matched to. If they don't look the same, tap <b>Wrong?</b>.</div>`;
+  const order = R.map((r, i) => i).sort((a, b) => { const A = R[a], B = R[b]; return (B.options.length > 0) - (A.options.length > 0) || ((A.choice == null) ? -1 : 0) - ((B.choice == null) ? -1 : 0) || String(A.partId).localeCompare(String(B.partId)); });
+  if (C.mode === "single") order.reverse();
+  h += `<div class="card" style="margin-top:10px">${order.map(i => pieceRow(R[i], i, locked)).join("") || `<div class="empty">No pieces yet.</div>`}</div>`;
+  if (!locked) {
+    const n = matched.filter(r => r.choice != null && r.choice !== "skip").length;
+    const addBtn = `<button class="btn yellow" data-a="apply" ${undecided || !n ? "disabled" : ""}>${undecided ? `Decide ${undecided} more` : `Add ${n} to sets`}</button>`;
+    h += C.mode === "single"
+      ? `<div class="bottom"><label class="btn red" ${C.busy ? 'style="pointer-events:none;opacity:.5"' : ""}>📷 Next piece<input type="file" accept="image/*" capture="environment" id="oneIn"></label>${addBtn}</div>`
+      : `<div class="bottom">${addBtn}</div>`;
+  } else h += `<div class="bottom"><button class="btn ghost" data-a="home">All sets</button><button class="btn red" data-a="scanNew">📷 Find more</button></div>`;
   return h;
+}
+function openPicker(ri) {
+  S.pick = { ri, q: "" };
+  const m = $("#modal");
+  m.innerHTML = `<div class="card picker"><div style="display:flex;gap:8px;align-items:center"><b style="flex:1">Which part is it?</b><button class="btn ghost" data-a="closePick" style="padding:8px 12px">✕</button></div>
+    <div style="display:flex;gap:10px;align-items:center;margin:10px 0"><img class="crop" src="${S.scan.results[ri].thumb}" alt=""><input type="search" id="pickQ" placeholder="Search: 2 x 4, plate, red…"></div>
+    <div id="pickList" class="plist"></div>
+    <button class="chip skip" data-a="pickNone" style="margin-top:10px">Not a piece from these sets → skip</button></div>`;
+  m.classList.add("show");
+  renderPickList();
+}
+function renderPickList() {
+  const { ri, q } = S.pick, r = S.scan.results[ri];
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const guess = new Map((r.guesses || []).map((g, k) => [String(g).toLowerCase(), k]));
+  const rows = [];
+  for (const id of S.scan.only) {
+    const s = S.sets[id]; if (!s) continue;
+    s.parts.forEach((p, i) => {
+      const hay = (p.n + " " + p.c + " " + p.p).toLowerCase();
+      if (words.length && !words.every(w => hay.includes(w) || hay.replace(/ x /g, "x").includes(w))) return;
+      const keys = [p.p, ...(p.bl || [])].map(x => String(x).toLowerCase());
+      let gr = 99; for (const k of keys) if (guess.has(k)) gr = Math.min(gr, guess.get(k));
+      rows.push({ id, i, p, s, need: Math.max(0, p.q - (p.f || 0)), gr });
+    });
+  }
+  rows.sort((a, b) => a.gr - b.gr || (b.need > 0) - (a.need > 0) || a.p.n.localeCompare(b.p.n));
+  const list = rows.slice(0, 60);
+  $("#pickList").innerHTML = list.map(x => `<button class="prow" data-a="pickPart" data-id="${esc(x.id)}" data-i="${x.i}">${x.p.img ? `<img class="pimg" src="${esc(x.p.img)}" alt="" loading="lazy">` : `<div class="pimg"></div>`}<div class="pi"><b>${esc(x.p.n)}</b><small>${swatch(x.p)}${esc(x.p.c)} · ${esc(x.s.name)} · ${x.need ? "needs " + x.need : "full"}${x.gr < 99 ? " · <b style='color:#6b3fb3'>suggested</b>" : ""}</small></div></button>`).join("")
+    || `<div class="empty" style="padding:14px">No parts match.</div>`;
 }
 
 function render() {
@@ -568,7 +615,7 @@ async function recogniseBox(file) {
 }
 async function loadPile(file) {
   const C = S.scan;
-  C.busy = true; C.err = false; C.msg = "Finding the pieces in your photo…"; C.img = null; render();
+  C.busy = true; C.err = false; C.msg = "Finding the pieces in your photo…"; C.img = null; C.results = null; C.showResults = false; render();
   try {
     const full = await loadImage(file);
     await sleep(30);
@@ -578,56 +625,74 @@ async function loadPile(file) {
     prev.width = full.width * sc; prev.height = full.height * sc; prev.getContext("2d").drawImage(full, 0, 0, prev.width, prev.height);
     C.img = prev.toDataURL("image/jpeg", 0.8);
     if (!C.boxes.length) C.boxes = [{ x: 0, y: 0, w: 1, h: 1, on: true }];
-    C.busy = false; C.msg = C.boxes.length === 1 && C.boxes[0].w === 1 ? "Couldn't separate pieces — I'll treat the whole photo as one piece." : "";
+    C.busy = false; C.msg = C.boxes.length === 1 && C.boxes[0].w === 1 ? "Couldn't separate pieces — try a plainer background." : "";
     render();
   } catch (e) { C.busy = false; C.err = true; C.msg = e.message; render(); }
+}
+function autoChoose(R) {
+  // pick automatically only when exactly one set-part still needs this piece; track need as we go
+  const used = new Map();
+  for (const r of R) {
+    if (r.manual) { if (typeof r.choice === "number") { const o = r.options[r.choice], k = o.id + ":" + o.i; used.set(k, (used.get(k) || 0) + 1); } continue; }
+    const need = o => { const p = S.sets[o.id].parts[o.i]; return p.q - (p.f || 0) - (used.get(o.id + ":" + o.i) || 0); };
+    const open = r.options.map((o, oi) => oi).filter(oi => need(r.options[oi]) > 0);
+    r.choice = !r.options.length || !open.length ? "skip" : open.length === 1 ? open[0] : null;
+    if (typeof r.choice === "number") { const o = r.options[r.choice], k = o.id + ":" + o.i; used.set(k, (used.get(k) || 0) + 1); }
+  }
+}
+async function identifyCrop(crop, idx) {
+  const r = await brickognize("/predict/parts/?predict_color=true", crop.blob);
+  return Object.assign(analysePiece(r, idx), { thumb: crop.thumb });
 }
 async function identify() {
   const C = S.scan, boxes = C.boxes.filter(b => b.on);
   C.busy = true; C.err = false; C.msg = `Identifying piece 1 of ${boxes.length}…`; render();
   const idx = buildIndex([...C.only]);
   const results = new Array(boxes.length); let done = 0, failed = 0, lastErr = "";
-  const work = async (k) => {
-    const crop = await cropBox(C.full, boxes[k]);
-    try {
-      const r = await brickognize("/predict/parts/?predict_color=true", crop.blob);
-      results[k] = Object.assign(analysePiece(r, idx), { thumb: crop.thumb });
-    } catch (e) { failed++; lastErr = e.message; results[k] = null; }
-    done++; const el = $("#scanMsg"); if (el) el.textContent = `Identifying pieces… ${done} of ${boxes.length}`;
-  };
   let next = 0;
-  await Promise.all([0, 1, 2].map(async () => { while (next < boxes.length) { const k = next++; await work(k); } }));
+  await Promise.all([0, 1, 2].map(async () => {
+    while (next < boxes.length) {
+      const k = next++;
+      try { results[k] = await identifyCrop(await cropBox(C.full, boxes[k]), idx); }
+      catch (e) { failed++; lastErr = e.message; }
+      done++; const el = $("#scanMsg"); if (el) el.textContent = `Identifying pieces… ${done} of ${boxes.length}`;
+    }
+  }));
   if (failed === boxes.length) { C.busy = false; C.err = true; C.msg = lastErr || "Recognition failed."; render(); return; }
-  // group identical pieces
-  const groups = new Map();
-  for (const r of results) {
-    if (!r) continue;
-    const key = r.options.length ? r.options.map(o => o.id + ":" + o.i).join(",") : "u:" + r.partId + ":" + r.color;
-    if (groups.has(key)) { const g = groups.get(key); g.count++; g.thumbs.push(r.thumb); if (r.score > g.score) Object.assign(g, { score: r.score, conf: r.conf }); }
-    else groups.set(key, Object.assign(r, { count: 1, thumbs: [r.thumb] }));
-  }
-  const R = [...groups.values()];
-  for (const r of R) {
-    const needOpts = r.options.map((o, oi) => oi).filter(oi => { const o = r.options[oi], p = S.sets[o.id].parts[o.i]; return p.q - (p.f || 0) > 0; });
-    r.choice = !r.options.length || !needOpts.length ? "skip" : needOpts.length === 1 ? needOpts[0] : null;
-  }
-  R.sort((a, b) => (b.options.length > 0) - (a.options.length > 0) || (a.choice === null ? -1 : 0) - (b.choice === null ? -1 : 0) || b.count - a.count);
-  C.results = R; C.busy = false; C.msg = failed ? `${failed} piece(s) couldn't be checked.` : ""; C.applied = "";
+  C.results = results.filter(Boolean); autoChoose(C.results);
+  C.busy = false; C.showResults = true; C.err = false; C.msg = failed ? `${failed} piece(s) couldn't be checked.` : ""; C.applied = "";
   render(); window.scrollTo(0, 0);
-  if (failed) toast(`${failed} piece(s) couldn't be checked`);
+}
+async function identifyOne(file) {
+  const C = S.scan;
+  if (C.applied) { C.results = []; C.applied = ""; }
+  C.results = C.results || [];
+  C.busy = true; C.err = false; C.msg = "Identifying the piece…"; render();
+  try {
+    const full = await loadImage(file);
+    let boxes = segment(full);
+    // one piece: use the biggest region if it looks like a real piece, else the whole photo
+    let b = boxes.sort((p, q) => q.w * q.h - p.w * p.h)[0];
+    if (!b || b.w * b.h < 0.002) b = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+    const res = await identifyCrop(await cropBox(full, b), buildIndex([...C.only]));
+    C.results.push(res); autoChoose(C.results);
+    C.busy = false; C.msg = ""; render(); window.scrollTo(0, 0);
+  } catch (e) { C.busy = false; C.err = true; C.msg = e.message; render(); }
 }
 function applyScan() {
   const C = S.scan, touched = new Set(); let added = 0, extra = 0;
   for (const r of C.results) {
     if (r.choice == null || r.choice === "skip") continue;
     const o = r.options[r.choice]; const s = S.sets[o.id]; if (!s) continue;
-    const p = s.parts[o.i], n = Math.min(Math.max(0, p.q - (p.f || 0)), r.count);
-    p.f = (p.f || 0) + n; added += n; extra += r.count - n; touched.add(o.id);
+    const p = s.parts[o.i];
+    if ((p.f || 0) < p.q) { p.f = (p.f || 0) + 1; added++; } else extra++;
+    touched.add(o.id);
   }
   saveAll();
   C.applied = `Added ${added} piece${added === 1 ? "" : "s"} to ${[...touched].map(id => S.sets[id].name).join(" and ")}${extra ? ` (${extra} extra — those parts were already full)` : ""}.`;
   render(); window.scrollTo(0, 0);
 }
+
 function exportBackup() {
   const blob = new Blob([JSON.stringify({ app: "brick-sorter", v: 1, sets: S.sets }, null, 1)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -656,12 +721,22 @@ document.addEventListener("click", e => {
     case "fetchSet": addSetByNumber(S.add.num); break;
     case "pickSugg": S.add.num = b.dataset.n; addSetByNumber(b.dataset.n); break;
     case "addOwned": S.add.owned = b.dataset.v === "1"; render(); break;
-    case "scan": S.scan = { only: new Set(Object.keys(S.sets)), boxes: [], img: null, results: null, msg: "" }; go("scan"); break;
-    case "scanNew": S.scan.results = null; S.scan.img = null; S.scan.boxes = []; S.scan.msg = ""; S.scan.applied = ""; go("scan"); break;
+    case "scan": S.scan = { mode: "single", only: new Set(Object.keys(S.sets)), boxes: [], img: null, results: null, msg: "" }; go("scan"); break;
+    case "scanNew": Object.assign(S.scan, { results: null, img: null, boxes: [], msg: "", err: false, applied: "", showResults: false }); go("scan"); break;
+    case "mode": S.scan.mode = b.dataset.v; Object.assign(S.scan, { results: null, img: null, boxes: [], msg: "", applied: "" }); render(); break;
+    case "fix": openPicker(+b.dataset.r); break;
+    case "closePick": $("#modal").classList.remove("show"); break;
+    case "pickPart": {
+      const r = S.scan.results[S.pick.ri], p = S.sets[b.dataset.id].parts[+b.dataset.i];
+      r.options = [{ id: b.dataset.id, i: +b.dataset.i, rank: 0, colorOk: true, name: p.n }]; r.choice = 0; r.manual = true;
+      r.name = p.n; r.partId = p.p; r.img = p.img;
+      $("#modal").classList.remove("show"); render(); break;
+    }
+    case "pickNone": { const r = S.scan.results[S.pick.ri]; r.choice = "skip"; r.manual = true; $("#modal").classList.remove("show"); render(); break; }
     case "scanSet": { const id = b.dataset.id; S.scan.only.has(id) ? S.scan.only.delete(id) : S.scan.only.add(id); render(); break; }
     case "tbox": { const bx = S.scan.boxes[+b.dataset.i]; bx.on = !bx.on; render(); break; }
     case "identify": identify(); break;
-    case "pick": { const r = S.scan.results[+b.dataset.r]; r.choice = b.dataset.o === "skip" ? "skip" : +b.dataset.o; render(); break; }
+    case "pick": { const r = S.scan.results[+b.dataset.r]; r.choice = b.dataset.o === "skip" ? "skip" : +b.dataset.o; r.manual = true; render(); break; }
     case "apply": applyScan(); break;
     case "inc": case "dec": { const p = s.parts[+b.dataset.i]; p.f = Math.max(0, Math.min(p.q, (p.f || 0) + (a === "inc" ? 1 : -1))); render(); saveAll(); break; }
     case "miss": S.missingOnly = b.dataset.v === "1"; render(); break;
@@ -672,12 +747,14 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("input", e => {
   if (e.target.id === "numIn") S.add.num = e.target.value;
+  if (e.target.id === "pickQ") { S.pick.q = e.target.value; renderPickList(); return; }
   if (e.target.id === "q") { S.filter = e.target.value; const s = S.sets[S.cur]; if (s) $("#list").innerHTML = listHTML(s); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "numIn") addSetByNumber(S.add.num); });
 document.addEventListener("change", e => {
   const t = e.target, f = t.files && t.files[0]; if (!f) return;
   if (t.id === "pileIn") loadPile(f);
+  if (t.id === "oneIn" || t.id === "oneIn2") identifyOne(f);
   if (t.id === "boxIn") recogniseBox(f);
   if (t.id === "importIn") importBackup(f);
   t.value = "";
